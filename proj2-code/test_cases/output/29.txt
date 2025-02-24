@@ -1,0 +1,4 @@
+@> wc
+@> jobs
+0: wc (stopped)
+@> exit

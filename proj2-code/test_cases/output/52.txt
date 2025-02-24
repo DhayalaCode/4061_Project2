@@ -1,0 +1,10 @@
+@> bg 0
+Job index out of bounds
+Failed to resume job in background
+@> wc
+@> bg 1
+Job index out of bounds
+Failed to resume job in background
+@> fg 0
+      0       0       0
+@> exit

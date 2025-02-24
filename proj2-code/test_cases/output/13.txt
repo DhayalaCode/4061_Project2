@@ -1,0 +1,7 @@
+@> cd test_cases/resources
+@> ls > ../out.txt
+@> cat ../out.txt
+gatsby.txt
+quote.txt
+slow_write.c
+@> exit

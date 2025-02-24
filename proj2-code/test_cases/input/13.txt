@@ -1,0 +1,4 @@
+@> cd test_cases/resources
+@> ls > ../out.txt
+@> cat ../out.txt
+@> exit

@@ -1,0 +1,8 @@
+@> wc
+^Z
+@> jobs
+@> wait-for 0
+@> jobs
+@> fg 0
+^D
+@> exit

@@ -1,0 +1,200 @@
+{
+    "name": "Swish Shell Tests",
+    "command": "./swish",
+    "prompt": "@> ",
+    "use_valgrind": "y",
+    "tests": [
+        {
+            "name": "Startup, Prompt, and Exit",
+            "description": "Starts up a swish shell, which should prompt for input  and then exit when instructed to.",
+            "input_file": "test_cases/input/1.txt",
+            "output_file": "test_cases/output/1.txt"
+        },
+        {
+            "name": "Print Current Working Directory",
+            "description": "Starts up a swish shell and prints the current working directory.",
+            "input_file": "test_cases/input/2.txt",
+            "output_file": "test_cases/output/2.txt"
+        },
+        {
+            "name": "Change Current Working Directory",
+            "description": "Prints the current working directory, changes to the 'test_cases' directory, then prints the current working directory again.",
+            "input_file": "test_cases/input/3.txt",
+            "output_file": "test_cases/output/3.txt"
+        },
+        {
+            "name": "Change Current Directory (Absolute Path)",
+            "description": "Change the current directory using an absolute path as argument.",
+            "input_file": "test_cases/input/6.txt",
+            "output_file": "test_cases/output/6.txt"
+        },
+        {
+            "name": "Change to Non-Existent Directory",
+            "description": "Attempts to change to a non-existent directory. Shell should print out an appropriate error message.",
+            "input_file": "test_cases/input/8.txt",
+            "output_file": "test_cases/output/8.txt"
+        },
+        {
+            "name": "Execute a Basic command",
+            "description": "Changes to 'test_cases/resources' directory and does an 'ls' command",
+            "input_file": "test_cases/input/9.txt",
+            "output_file": "test_cases/output/9.txt"
+        },
+        {
+            "name": "Execute Commands with a Single Argument",
+            "description": "Execute the 'cat' and 'wc' commands with a single argument",
+            "input_file": "test_cases/input/10.txt",
+            "output_file": "test_cases/output/10.txt"
+        },
+        {
+            "name": "Execute a Non-Existent Command",
+            "description": "Attempt to run a program that does not exist. Shell should print out an appropriate message.",
+            "input_file": "test_cases/input/12.txt",
+            "output_file": "test_cases/output/12.txt"
+        },
+        {
+            "name": "Redirect Output to File",
+            "description": "Run a 'ls' and redirect its output to a file. Then cat this file to display its contents.",
+            "input_file": "test_cases/input/13.txt",
+            "output_file": "test_cases/output/13.txt"
+         },
+         {
+            "name": "Output Redirection Overwrites File",
+            "description": "Run a 'ls' and redirect its output to a file. Then cat this file to display its contents and verify that old version of file is overwritten.",
+            "input_file": "test_cases/input/14.txt",
+            "output_file": "test_cases/output/14.txt"
+         },
+         {
+            "name": "Redirect Input From File",
+            "description": "Run 'wc' with its input coming from a file.",
+            "input_file": "test_cases/input/15.txt",
+            "output_file": "test_cases/output/15.txt"
+        },
+        {
+            "name": "Redirect Output from Command with Arguments to File",
+            "description": "Run a command with several arguments and redirect its output to a file. 'cat' this file to display its contents",
+            "input_file": "test_cases/input/17.txt",
+            "output_file": "test_cases/output/17.txt"
+        },
+        {
+            "name": "Redirect Input to Command with Arguments from File",
+            "description": "Run a command with several arguments and redirect its input from a file.",
+            "input_file": "test_cases/input/18.txt",
+            "output_file": "test_cases/output/18.txt"
+        },
+        {
+            "name": "Attempt to Redirect Input from Non-Existent File",
+            "description": "Attempt to run a command with input redirected from a non-existent file. The shell should print out an appropriate error message.",
+            "input_file": "test_cases/input/20.txt",
+            "output_file": "test_cases/output/20.txt"
+        },
+        {
+            "name": "Redirect both Input and Output",
+            "description": "Run the 'cat' command with both input and output redirected. The command effectively copies a file. Then 'cat' this copy to display its contents.",
+            "input_file": "test_cases/input/21.txt",
+            "output_file": "test_cases/output/21.txt"
+        },
+        {
+            "name": "Redirect Input and Output with Arguments",
+            "description": "Run 'wc' with several command line arguments, redirecting both input and output.",
+            "input_file": "test_cases/input/23.txt",
+            "output_file": "test_cases/output/23.txt"
+        },
+        {
+            "name": "Interrupt Running Process",
+            "description": "Run an interactive command that blocks the shell and interrupt it. The shell should resume and accept additional commands.",
+            "input_file": "test_cases/input/25.txt",
+            "output_file": "test_cases/output/25.txt"
+        },
+        {
+            "name": "Suspend Running Process",
+            "description": "Run an interactive command that blocks the shell and suspend it. The shell should resume and accept additional commands.",
+            "input_file": "test_cases/input/27.txt",
+            "output_file": "test_cases/output/27.txt"
+        },
+        {
+            "name": "Track Stopped Job",
+            "description": "Run an interactive command, suspend it, and use the 'jobs' command to list all stopped/background jobs.",
+            "input_file": "test_cases/input/29.txt",
+            "output_file": "test_cases/output/29.txt"
+        },
+        {
+            "name": "Track Stopped Job with Args",
+            "description": "Run an interactive command with arguments, suspend it, and use the 'jobs' command to list all stopped/background jobs.",
+            "input_file": "test_cases/input/30.txt",
+            "output_file": "test_cases/output/30.txt"
+        },
+        {
+            "name": "Resume stopped job in foreground",
+            "description": "Run an interactive job, suspend it, then resume it in foreground and complete it. Check output of 'jobs' to verify.",
+            "input_file": "test_cases/input/32.txt",
+            "output_file": "test_cases/output/32.txt"
+        },
+        {
+            "name": "Resume multiple stopped jobs in foreground",
+            "description": "Run several interactive jobs, suspend them, then resume in the foreground and complete them. Check output of jobs to verify.",
+            "input_file": "test_cases/input/33.txt",
+            "output_file": "test_cases/output/33.txt"
+        },
+        {
+            "name": "Out of Bounds Resume Index",
+            "description": "Tries to resume a non-existent job with the 'fg' command.",
+            "input_file": "test_cases/input/36.txt",
+            "output_file": "test_cases/output/36.txt"
+        },
+        {
+            "name": "Multiple Out of Bounds Resume Index",
+            "description": "Tries to resume several non-existent jobs with the 'fg' command.",
+            "input_file": "test_cases/input/37.txt",
+            "output_file": "test_cases/output/37.txt"
+        },
+        {
+            "name": "Out of Bounds Index with Existing Jobs",
+            "description": "Attempt to resume non-existent job when jobs list is non-empty.",
+            "input_file": "test_cases/input/38.txt",
+            "output_file": "test_cases/output/38.txt"
+        },
+        {
+            "name": "Clean up Interrupted Job",
+            "description": "Run a command and suspend it, then resume it with 'fg'. Interrupt the program and run 'jobs' to ensure it was removed from jobs list.",
+            "input_file": "test_cases/input/39.txt",
+            "output_file": "test_cases/output/39.txt"
+        },
+        {
+            "name": "Run Simple Program in Background",
+            "description": "Run a simple command in the background and check that it completes.",
+            "input_file": "test_cases/input/41.txt",
+            "output_file": "test_cases/output/41.txt"
+        },
+        {
+            "name": "Suspend Program and Resume in Background",
+            "description": "Use the 'bg' command to resume a stopped program in the background. Then verify that the program completes.",
+            "input_file": "test_cases/input/43.txt",
+            "output_file": "test_cases/output/43.txt"
+        },
+        {
+            "name": "Wait for a Background Program",
+            "description": "Use the 'wait-for' command to wait until a program finishes.",
+            "input_file": "test_cases/input/44.txt",
+            "output_file": "test_cases/output/44.txt"
+        },
+        {
+            "name": "Wait for All Background Programs",
+            "description": "Use the 'wait-all' command to wait for all background programs to terminate.",
+            "input_file": "test_cases/input/47.txt",
+            "output_file": "test_cases/output/47.txt"
+        },
+        {
+            "name": "Attempt to Wait for Stopped Job",
+            "description": "Start a program, suspend it, then attempt to wait for it. Check if the shell prints out an appropriate error message.",
+            "input_file": "test_cases/input/49.txt",
+            "output_file": "test_cases/output/49.txt"
+        },
+        {
+            "name": "Attempt to Resume Non-Existent Job in Background",
+            "description": "Try to resume a job in the background that does not exist.",
+            "input_file": "test_cases/input/52.txt",
+            "output_file": "test_cases/output/52.txt"
+        }
+    ]
+}

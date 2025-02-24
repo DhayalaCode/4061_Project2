@@ -1,0 +1,30 @@
+@> wc
+@> jobs
+0: wc (stopped)
+@> cat
+@> jobs
+0: wc (stopped)
+1: cat (stopped)
+@> wc -l
+@> jobs
+0: wc (stopped)
+1: cat (stopped)
+2: wc (stopped)
+@> fg 1
+this is a test
+this is a test
+of your shell program
+of your shell program
+@> jobs
+0: wc (stopped)
+1: wc (stopped)
+@> fg 0
+this is a test
+  1 4 15
+@> jobs
+0: wc (stopped)
+@> fg 0
+this is a test
+1
+@> jobs
+@> exit

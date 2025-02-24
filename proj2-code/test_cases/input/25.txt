@@ -1,0 +1,4 @@
+@> wc
+^C
+@> echo foo
+@> exit

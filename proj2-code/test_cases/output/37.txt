@@ -1,0 +1,10 @@
+@> fg 4
+Job index out of bounds
+Failed to resume job in foreground
+@> fg 8
+Job index out of bounds
+Failed to resume job in foreground
+@> fg 15
+Job index out of bounds
+Failed to resume job in foreground
+@> exit

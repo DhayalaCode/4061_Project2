@@ -1,0 +1,4 @@
+@> fg 0
+Job index out of bounds
+Failed to resume job in foreground
+@> exit

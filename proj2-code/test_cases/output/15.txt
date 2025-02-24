@@ -1,0 +1,3 @@
+@> wc < test_cases/resources/gatsby.txt
+{{wc < test_cases/resources/gatsby.txt}}
+ @> exit

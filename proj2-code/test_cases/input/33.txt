@@ -1,0 +1,23 @@
+@> wc
+^Z
+@> jobs
+@> cat
+^Z
+@> jobs
+@> wc -l
+^Z
+@> jobs
+@> fg 1
+this is a test
+of your shell program
+^D
+@> jobs
+@> fg 0
+this is a test
+^D
+@> jobs
+@> fg 0
+this is a test
+^D
+@> jobs
+@> exit

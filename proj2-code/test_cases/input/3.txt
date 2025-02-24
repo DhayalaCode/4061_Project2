@@ -1,0 +1,4 @@
+@> pwd
+@> cd test_cases
+@> pwd
+@> exit

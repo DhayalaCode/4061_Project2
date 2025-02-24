@@ -1,0 +1,1188 @@
+#! /usr/bin/env python3
+
+# Author: John Kolb <jhkolb@umn.edu>
+# Inspired by Chris Kauffman's original 'testy' utility
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Version 0.3.1 (11 September 2024)
+# Requires Python 3.10 or above
+# Tested in Linux environments only
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import difflib
+import enum
+import json
+import os
+import os.path
+import pty
+import re
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import textwrap
+import threading
+import time
+import typing
+
+BUF_SIZE = 4096
+DRAIN_OUTPUT_DELAY_SEC = 0.1
+PARENT_PROC_DELAY_SEC = 0.5
+
+# "--noediting" disables readline and therefore bracketed paste
+# This became the default in the change to bash 5.1 (packaged with Ubuntu 22.04)
+# from bash 5.0 (packaged with Ubuntu 20.04)
+# Otherwise, bash's output lines are prefixed with unnecessary escape sequences
+DEFAULT_COMMAND = "bash --norc --noediting"
+
+BASH_PROMPT = "$ "
+DEFAULT_POINT_VALUE = 1
+DEFAULT_TIMEOUT = 10
+TEST_RESULTS_DIR = "test_results"
+VALGRIND_ERROR_RET = 13
+DEFAULT_VALGRIND_OPTS = (
+    "--leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all"
+    + f" --error-exitcode={VALGRIND_ERROR_RET} --track-origins=yes"
+)
+TERMIOS_LFLAG = 3
+TERMIOS_CC = 6
+
+# Test parameters that can inherit a default value globablly defined for the entire suite
+TEST_SUITE_DEFAULTS = [
+    "command",
+    "prompt",
+    "timeout",
+    "environment",
+    "use_valgrind",
+    "valgrind_opts",
+]
+
+# Add ASCII escape codes for color higlighting when displaying certain words
+# in the terminal
+TEXT_HIGHLIGHTS = {
+    "Passed": "\N{esc}[1;32mPassed\N{esc}[0m",
+    "Failed": "\N{esc}[1;31mFailed\N{esc}[0m",
+    "Timed Out": "\N{esc}[1;33mTimed Out\N{esc}[0m",
+    "Valgrind Failure": "\N{esc}[1;33mValgrind Failure\N{esc}[0m",
+    "Segmentation Fault": "\N{esc}[1;33mSegmentation Fault\N{esc}[0m",
+}
+
+
+# Expands lines of templated text in input/output files to the output of a shell command
+# Example: {{pwd}}/foo/bar -> /home/goldy/csci4061/labs01-code/foo/bar
+def _shellExpand(match: re.Match, environment: dict[str, str]) -> str:
+    command = match.group(1)
+    res = subprocess.run(
+        command, shell=True, capture_output=True, text=True, check=True, env=environment
+    )
+    stdout = res.stdout.strip()
+    stderr = res.stderr.strip()
+    if len(stderr) > 0:
+        raise Exception(
+            f"Template expansion command {command} failed. stderr: {stderr}"
+        )
+    else:
+        return stdout
+
+
+# Expand all text surrounded by double curly braces in a template
+def expandTemplateLines(template: list[str], environment: dict[str, str]) -> list[str]:
+    return [
+        # Note that the regex uses '.+' and not '.+?'
+        # This is because some commands like 'echo ${MY_VAR}' may themselves
+        # contain curly braces, and we want those inlcuded in the capture.
+        # This does mean that each line of the template can only have one
+        # substitution location denoted by curly braces
+        re.sub(r"{{(.+)}}", lambda m: _shellExpand(m, environment), line)
+        for line in template
+    ]
+
+
+# Collects output from a pseudoterminal into a string, either until a timeout
+# expires or until a new prompt appears (if applicable)
+# fd: File descriptor for pseudoterminal master
+# timeout: Maximum amount of time to wait in total, in seconds
+# prompt: Command prompt emitted by an interactive program when it is ready to
+#         accept a new command, or 'None' if no prompt is expected
+# Returns: A tuple consisting of pty's output (string), and a boolean indicating
+#          if program is still alive
+def drainOutput(
+    fd: int, timeout: float, prompt: typing.Optional[str]
+) -> tuple[str, bool]:
+    if prompt is not None:
+        prompt = prompt.rstrip()  # Ignore any trailing whitespace in prompt
+    output = ""
+    p = select.poll()
+    p.register(fd, select.POLLIN)
+    current_time = time.monotonic()
+    deadline = current_time + timeout
+
+    while (
+        prompt is None or not output.rstrip().endswith(prompt)
+    ) and current_time < deadline:
+        # poll timeout is in msec rather than sec
+        res = p.poll((deadline - current_time) * 1000)
+        if len(res) > 0:
+            _, revents = res[0]
+            if revents & select.POLLIN:
+                payload = os.read(fd, BUF_SIZE).decode("utf8", errors="replace")
+                payload = payload.replace("\r\n", "\n")
+                output += payload
+            elif revents & select.POLLHUP:
+                return output, False
+        # else: poll() timed out, loop will end
+        current_time = time.monotonic()
+
+    return output, True
+
+
+# Simple way to compute number of digits in number 'n'
+# Used to cleanly format output presented to user
+def numDigits(n: int) -> int:
+    digits = 0
+    while n > 0:
+        n = n // 10
+        digits += 1
+    return digits
+
+
+# Used to generate file name based on a test's name
+def stringToFileName(s: str) -> str:
+    return re.sub(r"\s+", "_", s.lower())
+
+
+# Wrap a test's description with specific leading character on each line
+def wrapTestDescription(description: str, leader_char: str, width: int) -> str:
+    wrapped_lines = textwrap.wrap(description, width - 3)
+    return "\n".join([leader_char * 2 + " " + line for line in wrapped_lines])
+
+
+# Compares expected and actual output line by line and generates a human-readable diff
+# Note that empty lines and whitespace differences between tokens on a specific line are ignored
+# expected_output: The output a program is expected to produce, as a string
+# actual_output: The output generated by the program, as a string
+# Returns (True, "") if the outputs match. Otherwise, returns (False, diff) where diff is a side by
+# side comparison and summary of differences between the output text
+def compareOutput(expected_output: str, actual_output: str) -> tuple[bool, str]:
+    expected_lines = [
+        line for line in re.split(r"\n+", expected_output) if len(line.strip()) > 0
+    ]
+    actual_lines = [
+        line for line in re.split(r"\n+", actual_output) if len(line.strip()) > 0
+    ]
+    expected_lines_trimmed = [
+        re.sub(r"\s+", " ", line).strip() for line in expected_lines
+    ]
+    actual_lines_trimmed = [re.sub(r"\s+", " ", line).strip() for line in actual_lines]
+
+    matcher = difflib.SequenceMatcher(
+        None, expected_lines_trimmed, actual_lines_trimmed
+    )
+    codes = matcher.get_opcodes()
+
+    if (len(codes) == 1 and codes[0][0] == "equal") or len(codes) == 0:
+        return True, ""
+
+    # Used to justify output for clean formatting
+    # Maximum expected line length is max length of all lines in expected output
+    # or the length of the "EXPECT" header if that is longer
+    if len(expected_lines) == 0:
+        max_expected_line_len = len("==== EXPECT ====")
+    else:
+        max_expected_line_len = max([len(line) for line in expected_lines])
+        max_expected_line_len = max(max_expected_line_len, len("==== EXPECT ===="))
+    max_digits = max(numDigits(len(actual_lines)), numDigits(len(expected_lines)))
+
+    comparison = f"{'==== EXPECT ====' : <{max_expected_line_len}}   ==== ACTUAL ====\n"
+    summary = ""
+    for tag, i1, i2, j1, j2 in codes:
+        if tag == "equal":
+            for i, j in zip(range(i1, i2), range(j1, j2)):
+                comparison += f"{expected_lines[i] : <{max_expected_line_len}}   {actual_lines[j]}\n"
+
+        elif tag == "delete":
+            for i in range(i1, i2):
+                comparison += f"{expected_lines[i] : <{max_expected_line_len}} <\n"
+                summary += f"EXPECT {i+1 : >{max_digits}}) {expected_lines[i]}\n"
+
+        elif tag == "insert":
+            for j in range(j1, j2):
+                comparison += f"{' ' * max_expected_line_len} > {actual_lines[j]}\n"
+                summary += f"ACTUAL {j+1 : >{max_digits}}) {actual_lines[j]}\n"
+
+        elif tag == "replace":
+            # Replace is slightly unhelpful -- chunks identified from actual and
+            # expected can be different sizes
+            # First, print lines side-by-side until at least one chunk is exhausted
+            for i, j in zip(range(i1, i2), range(j1, j2)):
+                comparison += f"{expected_lines[i] : <{max_expected_line_len}} | {actual_lines[j]}\n"
+                summary += (
+                    f"EXPECT {i+1 : >{max_digits}}) {expected_lines[i]}\n"
+                    + f"ACTUAL {j+1 : >{max_digits}}) {actual_lines[j]}\n"
+                )
+
+            expected_chunk_len = i2 - i1
+            actual_chunk_len = j2 - j1
+            if expected_chunk_len > actual_chunk_len:
+                # Expected chunk is longer, so print out rest of its lines
+                for i in range(i1 + actual_chunk_len, i2):
+                    comparison += f"{expected_lines[i] : <{max_expected_line_len}} <\n"
+                    summary += f"EXPECT {i+1 : >{max_digits}}) {expected_lines[i]}\n"
+            elif actual_chunk_len > expected_chunk_len:
+                # Actual chunk is longer, so print out rest of its lines
+                for j in range(j1 + expected_chunk_len, j2):
+                    comparison += f"{' ' * max_expected_line_len} > {actual_lines[j]}\n"
+                    summary += f"ACTUAL {j+1 : >{max_digits}}) {actual_lines[j]}\n"
+
+        else:
+            # Should never occur
+            raise ValueError(f"Unknown diff tag {tag}")
+
+    full_diff = (
+        "== Side-by-Side Comparison ==\n"
+        + "== Differing lines have a character like '|' '>' or '<' in the middle\n"
+        + comparison
+        + "== Line Differences ==\n"
+        + summary.rstrip()
+    )
+    return False, full_diff
+
+
+# Represents result of executing a command. Names are self-explanatory
+class CommandOutcome(enum.Enum):
+    COMPLETED = enum.auto()
+    TIMED_OUT = enum.auto()
+    SEG_FAULT = enum.auto()
+    VALGRIND_FAIL = enum.auto()
+    CANCELED = enum.auto()
+
+
+# Represents the result of running a single test
+#   summary: A one-line summary of the test's result
+#   output: Full test output (such as command's output or a diff)
+#   max_score: The maximum possible score for the test
+#   score: The actual score for the test
+#   hidden: True for a hidden test (denoted in Gradescope JSON output), False
+#   otherwise
+@dataclasses.dataclass(frozen=True)
+class TestResult:
+    summary: str
+    output: str
+    max_score: float
+    score: float
+    hidden: bool
+
+
+# Represents an action to be taken against a specific test within a larger test
+# sequence. Names are self-explanatory
+class ActionType(enum.Enum):
+    RUN = enum.auto()
+    START = enum.auto()
+    FINISH = enum.auto()
+
+    @staticmethod
+    def fromStr(s: str) -> ActionType:
+        s = s.lower()
+        match s:
+            case "start":
+                return ActionType.START
+            case "run":
+                return ActionType.RUN
+            case "finish":
+                return ActionType.FINISH
+            case _:
+                raise ValueError(f"Unknown action type {s}")
+
+
+# Represents an action in one step of a Test Sequence
+#   target: Name of the test to act upon (must be defined)
+#   action)type: Specific action to be taken
+@dataclasses.dataclass(frozen=True)
+class SequenceAction:
+    target: str
+    action_type: ActionType
+
+
+# Represents a simple test case. One command is executed and its output is
+# compared to an expected result.
+class TestCase:
+    name: str
+    description: str
+    suite_name: str
+    idx: int
+    num_tests: int
+    command: str
+    output_file: str
+    input_file: typing.Optional[str]
+    prompt: str
+    points: float
+    timeout: float
+    environment: dict[str, str]
+    use_valgrind: bool
+    valgrind_opts: str
+    sequence_pos: int
+    hidden: bool = False
+    execute_result: tuple[str, CommandOutcome]
+    thread: threading.Thread
+    canceled: threading.Event
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        suite_name: str,
+        idx: int,
+        num_tests: int,
+        command: str,
+        output_file: str,
+        input_file: typing.Optional[str],
+        prompt: str,
+        points: float,
+        timeout: float,
+        environment: dict[str, str],
+        use_valgrind: bool,
+        valgrind_opts: str,
+        sequence_pos: int = -1,
+        hidden: bool = False,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.suite_name = suite_name
+        self.idx = idx
+        self.num_tests = num_tests
+        self.command = command
+        self.output_file = output_file
+        self.input_file = input_file
+        self.prompt = prompt
+        self.points = points
+        self.timeout = timeout
+        self.environment = environment
+        self.use_valgrind = use_valgrind
+        self.valgrind_opts = valgrind_opts
+        self.sequence_pos = sequence_pos
+        self.hidden = hidden
+        self.canceled = threading.Event()
+        test_num_width = numDigits(self.num_tests)
+        if sequence_pos < 0:
+            # If this test is part of a sequence, need to more precisely name output files to avoid collisions
+            output_file_name_root = (
+                f"{stringToFileName(self.suite_name)}-{self.idx:0>{test_num_width}}"
+            )
+        else:
+            output_file_name_root = f"{stringToFileName(self.suite_name)}-{self.idx:0>{test_num_width}}-{sequence_pos}"
+        self.expected_output_file = os.path.join(
+            TEST_RESULTS_DIR, "raw", output_file_name_root + "-expected.tmp"
+        )
+        self.actual_output_file = os.path.join(
+            TEST_RESULTS_DIR, "raw", output_file_name_root + "-actual.tmp"
+        )
+        self.results_output_file = os.path.join(
+            TEST_RESULTS_DIR, output_file_name_root + "-results.tmp"
+        )
+        self.valgrind_log_file = os.path.join(
+            TEST_RESULTS_DIR, output_file_name_root + "-valgrd.tmp"
+        )
+        self.valgrind_opts += f" --log-file={self.valgrind_log_file}"
+
+    # Create a TestCase from dictionary contents
+    @staticmethod
+    def fromDict(
+        d: dict[str, typing.Any],
+        suite_defaults: dict[str, typing.Any],
+        suite_name: str,
+        idx: int,
+        num_tests: int,
+        sequence_pos: int = -1,
+    ) -> TestCase:
+        name = d.get("name")
+        if name is None:
+            raise ValueError('Missing "name" field')
+        description = d.get("description")
+        if description is None:
+            raise ValueError('Missing "description" field')
+        output_file = d.get("output_file")
+        if output_file is None:
+            raise ValueError('Missing "output_file" field')
+        elif not os.path.isfile(output_file):
+            raise ValueError(f'Output file "{output_file} does not exist or is invalid')
+        hidden = d.get("hidden", False)
+
+        command = d.get("command", suite_defaults.get("command"))
+        input_file = d.get("input_file")
+        prompt = d.get("prompt", suite_defaults.get("prompt"))
+        if command is None and input_file is None:
+            raise ValueError('Command defaults to bash but no "input_file" field given')
+        if input_file is not None and not os.path.isfile(input_file):
+            raise ValueError(f'Input file "{input_file}" does not exist or is invalid')
+        if input_file is None and prompt is not None:
+            raise ValueError("Prompt is specified but no input file is provided")
+        environment = d.get("environment", suite_defaults.get("environment", {}))
+        if not isinstance(environment, dict):
+            raise ValueError('Non-dictionary "environment" value specified')
+        # Test environment should also capture base system environment variables
+        # These may be needed if the test has a templated input file
+        environment = os.environ | environment
+
+        # Set up default bash execution if needed
+        if command is None:
+            command = DEFAULT_COMMAND
+            prompt = BASH_PROMPT
+            environment["PS1"] = BASH_PROMPT
+
+        point_value = d.get("points")
+        if point_value is not None:
+            try:
+                point_value = float(point_value)
+            except ValueError:
+                raise ValueError(f'Invalid point value "{point_value}"')
+        else:
+            point_value = DEFAULT_POINT_VALUE
+
+        timeout = d.get("timeout", suite_defaults.get("timeout", DEFAULT_TIMEOUT))
+        try:
+            timeout = int(timeout)
+        except ValueError:
+            raise ValueError(f'Invalid timeout duration "{timeout}"')
+
+        use_valgrind = d.get("use_valgrind", suite_defaults.get("use_valgrind", False))
+        valgrind_opts = d.get(
+            "valgrind_opts", suite_defaults.get("valgrind_opts", DEFAULT_VALGRIND_OPTS)
+        )
+
+        return TestCase(
+            name,
+            description,
+            suite_name,
+            idx,
+            num_tests,
+            command,
+            output_file,
+            input_file,
+            prompt,
+            point_value,
+            timeout,
+            environment,
+            use_valgrind,
+            valgrind_opts,
+            sequence_pos,
+            hidden,
+        )
+
+    # Executes the test's command (possibly with specified input)
+    # Stores a pair consisting of test's output (string) and result
+    # (CommandOutcome) in this object's 'executeResult' field
+    def _executeCommand(self) -> None:
+        args = shlex.split(self.command)
+        command = args[0]
+        self.pid, master_fd = pty.fork()
+        if self.pid == 0:
+            if self.use_valgrind:
+                command = "valgrind"
+                args = ["valgrind"] + shlex.split(self.valgrind_opts) + args
+            os.execlpe(command, *args, self.environment)
+
+        # Parent process only
+        try:
+            current_time = time.monotonic()
+            deadline = current_time + self.timeout
+            time.sleep(PARENT_PROC_DELAY_SEC)
+            # Make sure we can deliver signals via pty master
+            term_attr = termios.tcgetattr(master_fd)
+            term_attr[TERMIOS_LFLAG] |= termios.ISIG
+            termios.tcsetattr(master_fd, termios.TCSANOW, term_attr)
+
+            if self.input_file is None:
+                output, _ = drainOutput(master_fd, self.timeout, self.prompt)
+            else:
+                output = ""
+                with open(self.input_file) as input:
+                    input_lines = expandTemplateLines(
+                        input.readlines(), self.environment
+                    )
+                i = 0
+
+                if self.prompt is not None:
+                    # Wait as long as needed until first prompt appears
+                    delay = self.timeout
+                else:
+                    # Wait for a bit for initial output, but no need to wait until a prompt appears
+                    delay = DRAIN_OUTPUT_DELAY_SEC
+
+                output_batch, still_alive = drainOutput(master_fd, delay, self.prompt)
+                output += output_batch
+                current_time = time.monotonic()
+
+                while i < len(input_lines) and still_alive and current_time < deadline:
+                    should_echo = True
+
+                    if input_lines[i] == "^C\n":
+                        payload = term_attr[TERMIOS_CC][termios.VINTR]
+                        should_echo = False
+                    elif input_lines[i] == "^Z\n":
+                        payload = term_attr[TERMIOS_CC][termios.VSUSP]
+                        should_echo = False
+                    elif input_lines[i] == "^D\n":
+                        payload = term_attr[TERMIOS_CC][termios.VEOF]
+                        should_echo = False
+                    elif self.prompt is not None and input_lines[i].startswith(
+                        self.prompt
+                    ):
+                        payload = (
+                            input_lines[i][len(self.prompt) :].lstrip().encode("utf8")
+                        )
+                    else:
+                        payload = input_lines[i].encode("utf8")
+
+                    if i == len(input_lines) - 1:
+                        # Last line of input, no need to wait for next prompt
+                        drain_prompt = None
+                        delay = deadline - current_time
+                    elif self.prompt is not None and input_lines[i + 1].startswith(
+                        self.prompt
+                    ):
+                        # Do not proceed until program outputs expected prompt
+                        drain_prompt = self.prompt
+                        delay = deadline - current_time
+                    else:
+                        # Pause to collect output but do not await appearance of prompt
+                        drain_prompt = None
+                        delay = DRAIN_OUTPUT_DELAY_SEC
+
+                    if not should_echo:
+                        term_attr[TERMIOS_LFLAG] &= ~termios.ECHO
+                        termios.tcsetattr(master_fd, termios.TCSANOW, term_attr)
+
+                    os.write(master_fd, payload)
+                    output_batch, still_alive = drainOutput(
+                        master_fd, delay, drain_prompt
+                    )
+                    output += output_batch
+                    current_time = time.monotonic()
+                    i += 1
+
+                    if not should_echo:
+                        # Restore echo as default for next line of input
+                        term_attr[TERMIOS_LFLAG] |= termios.ECHO
+                        termios.tcsetattr(master_fd, termios.TCSANOW, term_attr)
+
+            current_time = time.monotonic()
+            timed_out = current_time >= deadline
+            if timed_out:
+                try:
+                    os.kill(self.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # Process terminated after timeout expired and before signal sent
+
+            _, exit_status = os.waitpid(self.pid, 0)
+            if timed_out:
+                self.execute_result = (output, CommandOutcome.TIMED_OUT)
+            elif self.canceled.is_set():
+                self.execute_result = (output, CommandOutcome.CANCELED)
+            elif (
+                os.WIFSIGNALED(exit_status)
+                and os.WTERMSIG(exit_status) == signal.SIGSEGV
+            ):
+                self.execute_result = output, CommandOutcome.SEG_FAULT
+            elif (
+                self.use_valgrind
+                and os.WIFEXITED(exit_status)
+                and os.WEXITSTATUS(exit_status) == VALGRIND_ERROR_RET
+            ):
+                self.execute_result = output, CommandOutcome.VALGRIND_FAIL
+            else:
+                self.execute_result = output, CommandOutcome.COMPLETED
+        finally:
+            os.close(master_fd)
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._executeCommand)
+        self.thread.start()
+
+    def finish(self) -> TestResult:
+        self.thread.join()
+
+        columns = shutil.get_terminal_size()[0]
+        output = ""
+        if self.sequence_pos < 0:
+            output += "=" * columns + "\n"
+            output += f"== Test {idx}: {self.name}\n"
+            output += (
+                wrapTestDescription(self.description, "=", min(columns, 80)) + "\n"
+            )
+            output += "Running test...\n"
+        else:
+            output += (
+                wrapTestDescription(self.description, "-", min(columns, 80)) + "\n"
+            )
+
+        actual_output, outcome = self.execute_result
+        with open(self.output_file) as f:
+            expected_output = "".join(
+                expandTemplateLines(f.readlines(), self.environment)
+            )
+        with open(self.expected_output_file, "w") as f:
+            f.write(expected_output)
+        with open(self.actual_output_file, "w") as f:
+            f.write(actual_output)
+            output += f"Expected output is in file '{self.expected_output_file}'\n"
+            output += f"Actual output is in file '{self.actual_output_file}'\n"
+
+        if outcome is CommandOutcome.TIMED_OUT:
+            output += "Error: TIMED OUT. Output:\n"
+            output += actual_output + "\n"
+            result = TestResult(
+                f"Timed Out -> Results in {self.results_output_file}",
+                output,
+                self.points,
+                0,
+                self.hidden,
+            )
+
+        elif outcome is CommandOutcome.SEG_FAULT:
+            output += "Error: SEGMENTATION FAULT. Output:\n"
+            output += actual_output + "\n"
+            result = TestResult(
+                f"Segmentation Fault -> Results in {self.results_output_file}",
+                output,
+                self.points,
+                0,
+                self.hidden,
+            )
+
+        elif outcome is CommandOutcome.VALGRIND_FAIL:
+            output += "Error: VALGRIND CHECK FAILED. Output:\n"
+            output += actual_output + "\n"
+            output += f"\n== Valgrind Results (from '{self.valgrind_log_file}')\n"
+            with open(self.valgrind_log_file) as g:
+                output += g.read()
+            result = TestResult(
+                f"Valgrind Failure -> Results in {self.results_output_file}",
+                output,
+                self.points,
+                0,
+                self.hidden,
+            )
+
+        elif outcome is CommandOutcome.CANCELED:
+            output += "Test CANCELED. Output so far:\n"
+            output += actual_output + "\n"
+            result = TestResult(
+                f"Canceled -> Results in {self.results_output_file}",
+                output,
+                self.points,
+                0,
+                self.hidden,
+            )
+
+        elif outcome is CommandOutcome.COMPLETED:
+            output_match, diff = compareOutput(expected_output, actual_output)
+            if output_match:
+                output += "Test PASSED\n"
+                result = TestResult(
+                    "Passed", output, self.points, self.points, self.hidden
+                )
+            else:
+                output += "Test FAILED\n"
+                output += diff + "\n"
+                result = TestResult(
+                    f"Failed -> Results in {self.results_output_file}",
+                    output,
+                    self.points,
+                    0,
+                    self.hidden,
+                )
+
+        else:  # Should never happen
+            raise ValueError(f"Unknown Command Outcome {outcome}")
+
+        with open(self.results_output_file, "w") as f:
+            f.write(output)
+        return result
+
+    def run(self) -> TestResult:
+        self.start()
+        return self.finish()
+
+    def cancel(self) -> None:
+        self.canceled.set()
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # Process terminated before signal sent
+
+
+# Represents a test consisting of a sequence of steps
+# Like a regular test case, a test sequence must have a name and description
+# It then defines a sequence of "steps" where each step runs, starts, or awaits
+# one or more test cases. These steps are run in order and may result in
+# concurrent execution of different tests (e.g., if test A is started, then test
+# B is started, then both are awaited)
+class TestSequence:
+    name: str
+    description: str
+    suite_name: str
+    idx: int
+    num_tests: int
+    tests: list[TestCase]
+    steps: list[list[SequenceAction]]
+    points: float
+    tests_by_name: dict[str, TestCase]
+    hidden: bool
+    results_output_file: str
+    use_valgrind: bool
+    canceled: threading.Event
+    pending_tests_lock: threading.Lock
+    pending_tests: dict[str, TestCase]
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        suite_name: str,
+        idx: int,
+        num_tests: int,
+        tests: list[TestCase],
+        steps: list[list[SequenceAction]],
+        points: float,
+        hidden: bool = False,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.tests = tests
+        self.steps = steps
+        self.tests_by_name = {test.name: test for test in tests}
+        self.points = points
+        self.hidden = hidden
+
+        test_num_width = numDigits(num_tests)
+        output_file_name_root = (
+            f"{stringToFileName(suite_name)}-{idx:0>{test_num_width}}"
+        )
+        self.results_output_file = os.path.join(
+            TEST_RESULTS_DIR, output_file_name_root + "-results.tmp"
+        )
+        self.use_valgrind = any([test.use_valgrind for test in self.tests])
+
+        # For thread-safe cancellation
+        self.canceled = threading.Event()
+        self.pending_tests_lock = threading.Lock()
+        self.pending_tests = {}
+
+    def run(self) -> typing.Optional[TestResult]:
+        columns, _ = shutil.get_terminal_size()
+        output = "=" * columns + "\n"
+        output += f"== Test {idx}: {self.name}\n"
+        output += wrapTestDescription(self.description, "=", min(columns, 80)) + "\n"
+        output += "Running test...\n"
+        error = False
+        summary = "Passed"
+
+        for i, step in enumerate(self.steps):
+            output += "~" * columns + "\n"
+            output += f"Step {i+1}\n"
+            for j, action in enumerate(step):
+                output += "-" * columns + "\n"
+                test = self.tests_by_name[action.target]
+                if error:
+                    if action.action_type == ActionType.FINISH:
+                        with self.pending_tests_lock:
+                            prev_test = self.pending_tests.pop(action.target, None)
+
+                        if prev_test is not None:
+                            # Test was already started, so we should cancel it and
+                            # collect any output produced so far
+                            test.cancel()
+                            result = test.finish()
+                            output += "Prevously started test ignored due to previous error(s)\n"
+                            output += result.output
+                    else:
+                        output += (
+                            f"Action {j+1}: Not executed due to previous error(s)\n"
+                        )
+                elif action.action_type is ActionType.START:
+                    if self.canceled.is_set():
+                        return None  # Bail out, no one is checking return value
+                    with self.pending_tests_lock:
+                        output += f"Action {j+1}: Start {action.target}\n"
+                        test.start()
+                        self.pending_tests[action.target] = test
+                else:
+                    assert (
+                        action.action_type is ActionType.FINISH
+                        or action.action_type is ActionType.RUN
+                    )
+                    output += f"Action {j+1}: {action.action_type.name.title()} {action.target}\n"
+                    if action.action_type is ActionType.RUN:
+                        if self.canceled.is_set():
+                            return None  # Bail out now, no one is checking return value
+                        with self.pending_tests_lock:
+                            test.start()
+                            self.pending_tests[action.target] = test
+
+                    # This will wait on test outcome, need lock released
+                    result = test.finish()
+                    with self.pending_tests_lock:
+                        del self.pending_tests[action.target]
+                    output += result.output
+                    if (
+                        result.summary.startswith("Segmentation Fault")
+                        or result.summary.startswith("Valgrind Failure")
+                        or result.summary.startswith("Timed Out")
+                        or result.summary.startswith("Failed")
+                    ):
+                        error = True
+                        # Change output's references to individual test's
+                        # notion of output file to the test sequence's
+                        # notion of output file
+                        summary = result.summary.replace(
+                            test.results_output_file, self.results_output_file
+                        )
+
+        # No partial credit on test sequences
+        # This also affects tabulation of passed tests in __main__ code below
+        sequence_score = 0 if error else self.points
+
+        with open(self.results_output_file, "w") as f:
+            f.write(output)
+        return TestResult(summary, output, self.points, sequence_score, self.hidden)
+
+    def cancel(self):
+        self.canceled.set()
+        with self.pending_tests_lock:
+            for pending_test in self.pending_tests.values():
+                pending_test.cancel()
+
+    @staticmethod
+    def fromDict(
+        d: dict[str, typing.Any],
+        suite_defaults: dict[str, typing.Any],
+        suite_name: str,
+        idx: int,
+        num_tests: int,
+    ):
+        name = d.get("name")
+        if name is None:
+            raise ValueError('Missing "name" field')
+        description = d.get("description")
+        if description is None:
+            raise ValueError('Missing "description" field')
+        points = d.get("points", DEFAULT_POINT_VALUE)
+        try:
+            points = float(points)
+        except ValueError:
+            raise ValueError('Invalid "points" field')
+        hidden = d.get("hidden", False)
+
+        declared_tests = d.get("tests")
+        if declared_tests is None:
+            raise ValueError(f'Missing "tests" field')
+
+        tests = []
+        for i, test_dict in enumerate(declared_tests):
+            if "points" in test_dict:
+                raise ValueError(f'Subtest {i+1} invalid: Specifies a "points" value')
+            try:
+                tests.append(
+                    TestCase.fromDict(
+                        test_dict, suite_defaults, suite_name, idx, num_tests, i + 1
+                    )
+                )
+            except ValueError as e:
+                raise ValueError(f"Subtest {i+1} invalid: {e.args[0]}")
+
+        declared_steps = d.get("steps")
+        if declared_steps is None:
+            raise ValueError(f'Missing "steps" field')
+        test_names = set([test.name for test in tests])
+        started_tests = set()
+        finished_tests = set()
+        steps = []
+        for i, step in enumerate(declared_steps):
+            steps.append([])
+            for j, action in enumerate(step):
+                a_target = action.get("target")
+                if a_target is None:
+                    raise ValueError(f"Step {i+1}: Action {j+1}: No target specified")
+                elif a_target not in test_names:
+                    raise ValueError(
+                        f'Step {i+1}: Action {j+1}: Target "{a_target}" is not an existing test'
+                    )
+
+                a_type = action.get("type")
+                if a_type is None:
+                    raise ValueError(f"Step {i+1}: Action {j+1}: No type specified")
+                elif a_type == "start":
+                    if a_target in finished_tests:
+                        raise ValueError(
+                            f"Step {i+1}: Action {j+1}: Target already finished at this point"
+                        )
+                    started_tests.add(a_target)
+                elif a_type == "run":
+                    if a_target in finished_tests:
+                        raise ValueError(
+                            f"Step {i+1}: Action {j+1}: Target already finished at this point"
+                        )
+                    finished_tests.add(a_target)
+                elif a_type == "finish":
+                    if a_target not in started_tests:
+                        raise ValueError(
+                            f"Step {i+1}: Action {j+1}: Target not started at this point"
+                        )
+                    finished_tests.add(a_target)
+                else:
+                    raise ValueError(
+                        f'Step {i+1}: Action {j+1}: Unknown action type "{a_type}"'
+                    )
+
+                # All validated at this point
+                steps[-1].append(SequenceAction(a_target, ActionType.fromStr(a_type)))
+
+        unfinished_tests = started_tests.difference(finished_tests)
+        if len(unfinished_tests) > 0:
+            raise ValueError("One or more targets started but not finished")
+        unused_tests = test_names.difference(finished_tests)
+        if len(unused_tests) > 0:
+            raise ValueError(
+                f'The following tests were defined but not executed: {", ".join(unused_tests)}'
+            )
+
+        return TestSequence(
+            name, description, suite_name, idx, num_tests, tests, steps, points, hidden
+        )
+
+
+# Represents a test suite. It has a name, a possible set of default options
+# that should take effect for every test case unless specified otherwise,
+# and a sequence of test cases.
+class TestSuite:
+    name: str
+    tests: list[typing.Union[TestCase, TestSequence]]
+
+    def __init__(
+        self, name: str, tests: list[typing.Union[TestCase, TestSequence]]
+    ) -> None:
+        self.name = name
+        self.tests = tests
+
+    @staticmethod
+    def fromDict(d: dict[str, typing.Any]) -> TestSuite:
+        name = d.get("name")
+        if name is None:
+            raise ValueError('Missing "name" field')
+        tests = d.get("tests")
+        if tests is None:
+            raise ValueError('Missing "tests" field')
+
+        suite_defaults = {k: v for k, v in d.items() if k in TEST_SUITE_DEFAULTS}
+        suite_tests = []
+        for i, test in enumerate(tests):
+            try:
+                if test.get("type", "individual") == "sequence":
+                    suite_tests.append(
+                        TestSequence.fromDict(
+                            test, suite_defaults, name, i + 1, len(tests)
+                        )
+                    )
+                else:
+                    suite_tests.append(
+                        TestCase.fromDict(test, suite_defaults, name, i + 1, len(tests))
+                    )
+            except ValueError as err:
+                raise ValueError(f"Test {i+1} invalid: {err.args[0]}")
+
+        return TestSuite(name, suite_tests)
+
+
+# Parses value of the '-n' command line argument, specifies which subset of
+# tests within suite to run by those tests' indexes
+# idx_spec: String containing test indexes
+# num_tests: The total number of tests in the test suite
+# Returns a list of indexes or 'None' if 'idx_spec' is invalid
+def parseTestIndexes(idx_spec: str, num_tests: int) -> typing.Optional[list[int]]:
+    # Index range in the form "x-y"
+    if "-" in idx_spec:
+        tokens = re.split(r"\s*\-\s*", idx_spec)
+        if len(tokens) != 2:
+            return None
+        try:
+            start = int(tokens[0])
+            end = int(tokens[1])
+        except ValueError:
+            return None
+        if start <= 0 or start > num_tests:
+            return None
+        if end > num_tests:
+            end = num_tests
+        return list(range(start, end + 1))
+
+    # Index set in the form "a, b, c, d"
+    elif "," in idx_spec:
+        tokens = re.split(r"\s*\,\s*", idx_spec)
+        try:
+            indexes = [int(x) for x in tokens]
+        except ValueError:
+            return None
+        if len(set(indexes)) != len(indexes):
+            # Duplicates present
+            return None
+        elif any([i <= 0 or i > num_tests for i in indexes]):
+            # At least one index out of valid range
+            return None
+        return indexes
+
+    # Assume a single test number is specified
+    try:
+        index = int(idx_spec)
+    except ValueError:
+        return None
+    if index <= 0 or index > num_tests:
+        return None
+    return [index]
+
+
+# Print out one-line summary of a test result
+def printTestSummary(num_tests: int, idx: int, name: str, summary: str) -> None:
+    max_test_digits = numDigits(num_tests)
+    # Only apply color highlighting if we're outputting to a terminal and not
+    # redirected to a file
+    if sys.stdout.isatty():
+        for original, highlighted in TEXT_HIGHLIGHTS.items():
+            summary = summary.replace(original, highlighted)
+    print(f"Test {idx :>{max_test_digits}}) {name}: {summary}")
+
+
+# Convert a list of TestResult instances to a dictionary suitable for
+# JSON serialization (in particular, following Gradescope's schema)
+def exportResultsForJson(test_results: typing.Iterable[tuple[str, TestResult]]) -> dict:
+    export: dict = {"tests": []}
+    for name, result in test_results:
+        export["tests"].append(
+            {
+                "score": result.score,
+                "max_score": result.max_score,
+                "name": name,
+                "output": result.output,
+                "visibility": "hidden" if result.hidden else "visible",
+            }
+        )
+    # Do not include hidden test points in total
+    export["score"] = sum(
+        [test["score"] for test in export["tests"] if test["visibility"] == "visible"]
+    )
+    return export
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser("testius")
+    parser.add_argument("test_file")
+    parser.add_argument("-j", "--json", action="store_true")
+    parser.add_argument("-n", "--numbers")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    arguments = parser.parse_args()
+
+    if arguments.json and arguments.verbose:
+        print("Error: Cannot specify both JSON and verbose output modes")
+        sys.exit(1)
+
+    if not os.path.isfile(arguments.test_file):
+        print(f'Error: "{arguments.test_file}" does not exist or is not a valid file')
+        sys.exit(1)
+
+    with open(arguments.test_file) as test_file:
+        try:
+            test_suite_dict = json.load(test_file)
+        except:
+            print("Error: Specified file must be valid JSON")
+            sys.exit(1)
+    try:
+        test_suite = TestSuite.fromDict(test_suite_dict)
+    except ValueError as e:
+        print("Invlaid test suite file")
+        print(e.args[0])
+        sys.exit(1)
+
+    if any([test.use_valgrind for test in test_suite.tests]):
+        if shutil.which("valgrind") is None:
+            print(
+                "Error: These tests require the 'valgrind' program which is not currently installed"
+            )
+            print("Install valgrind and then re-run these tests")
+            sys.exit(1)
+
+    total_num_tests = len(test_suite.tests)
+    test_indexes = list(range(1, total_num_tests + 1))
+    if arguments.numbers is not None:
+        specified_tests = parseTestIndexes(arguments.numbers, total_num_tests)
+        if specified_tests is None:
+            print(f'Error: Invalid Test Index Specification "{arguments.numbers}"')
+            sys.exit(1)
+        else:
+            test_indexes = specified_tests
+
+    # Always clean out existing test results directory before running tests again
+    if os.path.exists(TEST_RESULTS_DIR):
+        shutil.rmtree(TEST_RESULTS_DIR)
+    os.mkdir(TEST_RESULTS_DIR)
+    os.mkdir(os.path.join(TEST_RESULTS_DIR, "raw"))
+
+    num_tests_to_run = len(test_indexes)
+    if not arguments.json:
+        print(f"== {test_suite.name}")
+        print(f"== Running {num_tests_to_run}/{total_num_tests} tests")
+
+    test_results = []
+    for idx in test_indexes:
+        test = test_suite.tests[idx - 1]
+        try:
+            result = test.run()
+            # None is only returned if tests are cancelled So this branch should
+            # never actually be taken
+            if result is None:
+                print(f"Failed to run test {idx}")
+                sys.exit(1)
+            else:
+                if arguments.verbose:
+                    # Output will already have a newline at its end
+                    print(result.output, end="")
+                elif not arguments.json:
+                    printTestSummary(total_num_tests, idx, test.name, result.summary)
+                test_results.append(result)
+        except KeyboardInterrupt:
+            # Stop tests but still print out summary
+            test.cancel()
+            break
+
+    if arguments.json:
+        test_names = [test_suite.tests[idx - 1].name for idx in test_indexes]
+        json_results = exportResultsForJson(zip(test_names, test_results))
+        print(json.dumps(json_results))
+    else:
+        num_tests_passed = 0
+        total_score = 0.0
+        total_max_score = 0.0
+        for result in test_results:
+            total_score += result.score
+            total_max_score += result.max_score
+            if result.score > 0:
+                num_tests_passed += 1
+
+        if arguments.verbose:
+            columns, _ = shutil.get_terminal_size()
+            print("=" * columns)
+            print("== Summary of Results")
+            max_test_digits = numDigits(total_num_tests)
+            for idx, result in zip(test_indexes, test_results):
+                name = test_suite.tests[idx - 1].name
+                summary = result.summary
+                printTestSummary(total_num_tests, idx, name, summary)
+
+        print()
+        num_tests_ran = len(test_results)
+        print(f"Ran {num_tests_ran}/{num_tests_to_run} Requested Tests")
+        print(f"Passed {num_tests_passed}/{num_tests_ran} Tests")
+        print(f"Total Score: {total_score}/{total_max_score}")

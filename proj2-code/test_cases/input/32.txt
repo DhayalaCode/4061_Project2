@@ -1,0 +1,7 @@
+@> wc
+^Z
+@> jobs
+@> fg 0
+this is a test
+^D
+@> exit

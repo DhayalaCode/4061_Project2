@@ -1,0 +1,2 @@
+@> ./this_program_does_not_exist
+@> exit
