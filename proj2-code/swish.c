@@ -157,6 +157,23 @@ int main(int argc, char **argv) {
             //   1. Use fork() to spawn a child process
             //   2. Call run_command() in the child process
             //   2. In the parent, use waitpid() to wait for the program to exit
+            int status;
+            pid_t cpid = fork();
+            if (cpid < 0) {
+                perror("fork failed.");
+            } else if (cpid == 0) {
+                run_command(&tokens);
+                exit(1);
+            } else {
+                pid_t terminated_pid = waitpid(cpid, &status, 0);
+                if (terminated_pid < 0) {
+                    perror("wait() failed");
+                    return 1;
+                }
+                if (!WIFEXITED(status)) {
+                    printf("Child exited abnormally\n");
+                }
+            }
 
             // TODO Task 4: Set the child process as the target of signals sent to the terminal
             // via the keyboard.
