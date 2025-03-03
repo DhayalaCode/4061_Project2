@@ -85,11 +85,14 @@ int main(int argc, char **argv) {
             // Otherwise, change to the home directory by default
             // This is available in the HOME environment variable (use getenv())
             const char *second_token = strvec_get(&tokens, 1);
-            chdir(second_token);
             if (second_token != NULL) {
-                chdir(second_token);
+                if (chdir(second_token) != 0) {
+                    perror("cannot change dir.");
+                }
             } else {
-                chdir(getenv("HOME"));
+                if (chdir(getenv("HOME")) != 0) { //error checking from get env?
+                    perror("cannot change dir to HOME.");
+                }
             }
         }
 
