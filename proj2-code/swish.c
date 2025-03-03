@@ -87,11 +87,14 @@ int main(int argc, char **argv) {
             const char *second_token = strvec_get(&tokens, 1);
             if (second_token != NULL) {
                 if (chdir(second_token) != 0) {
-                    perror("cannot change dir.");
+                    perror("chdir");
+                    if (chdir(getenv("HOME")) != 0) { //error checking from get env?
+                        perror("cannot change dir to HOME.");
+                    }
                 }
             } else {
                 if (chdir(getenv("HOME")) != 0) { //error checking from get env?
-                    perror("cannot change dir to HOME.");
+                    perror("chdir");
                 }
             }
         }
