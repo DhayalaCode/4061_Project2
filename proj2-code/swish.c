@@ -59,6 +59,23 @@ int main(int argc, char **argv) {
         if (strcmp(first_token, "pwd") == 0) {
             // TODO Task 1: Print the shell's current working directory
             // Use the getcwd() system call
+            char *buffer;
+            buffer = (char *)malloc(CMD_LEN);
+
+            if (buffer == NULL) {
+                perror("unable to allocate memory.");
+                return -1;
+            }
+
+            if (getcwd(buffer,CMD_LEN) == NULL) {
+                perror("getcwd error");
+                free(buffer);
+                return -1;
+            }
+
+            printf("%s\n", buffer);
+            free(buffer);
+
         }
 
         else if (strcmp(first_token, "cd") == 0) {
