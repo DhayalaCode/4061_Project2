@@ -51,12 +51,30 @@ int run_command(strvec_t *tokens) {
         // exit(1);
         return -1;
     }
-
     char *args[tokens->length + 1];
     for (int i = 0; i < tokens->length; i++) {
         args[i] = tokens->data[i];
     }
     args[tokens->length] = NULL;
+
+
+    struct sigaction dft_sig_action;
+    dft_sig_action.sa_handler = SIG_DFL;
+    if (sigfillset(&dft_sig_action.sa_mask) == -1) {
+        perror("sigfillset");
+        return 1;
+    }
+    dft_sig_action.sa_flags = 0;
+    if (sigaction(SIGTTIN, &dft_sig_action, NULL) == -1 || sigaction(SIGTTOU, &dft_sig_action, NULL) == -1) {
+        perror("sigaction");
+        return 1;
+    }
+    pid_t pid = getpid();
+    if (setpgid(pid, pid) == -1) {
+        perror("setpgid");
+        return -1;
+    }
+
 
     // TODO Task 3: Extend this function to perform output redirection before exec()'ing
     // Check for '<' (redirect input), '>' (redirect output), '>>' (redirect and append output)
@@ -179,6 +197,57 @@ int resume_job(strvec_t *tokens, job_list_t *jobs, int is_foreground) {
     // 5. If the job has terminated (not stopped), remove it from the 'jobs' list
     // 6. Call tcsetpgrp(STDIN_FILENO, <shell_pid>). shell_pid is the *current*
     //    process's pid, since we call this function from the main shell process
+
+
+        if (tokens->length < 2) {
+            fprintf(stderr, "Usage: fg <job_number>\n");
+            return -1;
+        }
+
+        // Parse job index
+        int job_index;
+        if (sscanf(tokens->data[1], "%d", &job_index) != 1) {
+            fprintf(stderr, "Invalid job number\n");
+            return -1;
+        }
+
+        // Retrieve job
+        job_t *job = job_list_get(jobs, job_index);
+        if (job == NULL) {
+            fprintf(stderr, "Job index out of bounds\n");
+            return -1;
+        }
+
+
+        pid_t ppid = getpgid(0);
+        if (tcsetpgrp(STDIN_FILENO, job->pid) == -1) {
+            perror("tcsetpgrp");
+            return -1;
+        }
+
+        if (kill(-job->pid, SIGCONT) == -1) {//send the entire process group.
+            perror("kill");
+            return -1;
+        }
+        int status;
+        pid_t terminated_pid = waitpid(job->pid, &status, WUNTRACED);
+        if (terminated_pid < 0) {
+            perror("waitpid");
+            return -1;
+        }
+
+        // Check job status
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            job_list_remove(jobs, job_index);
+        } else if (WIFSTOPPED(status)) {
+            job->status = status;
+        }
+
+        // Restore shell to foreground
+        if (tcsetpgrp(STDIN_FILENO, ppid) == -1) {
+            perror("tcsetpgrp");
+            return -1;
+        }
 
     // TODO Task 6: Implement the ability to resume stopped jobs in the background.
     // This really just means omitting some of the steps used to resume a job in the foreground:

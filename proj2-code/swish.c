@@ -173,20 +173,54 @@ int main(int argc, char **argv) {
                 }
                 exit(0);
             } else {
-                pid_t terminated_pid = waitpid(cpid, &status, 0);
+                // TODO Task 4: Set the child process as the target of signals sent to the terminal
+                // via the keyboard.
+                // To do this, call 'tcsetpgrp(STDIN_FILENO, <child_pid>)', where child_pid is the
+                // child's process ID just returned by fork(). Do this in the parent process.
+                pid_t ppid = getpid();
+                if (setpgid(cpid, cpid) == -1) {
+                    perror("setpgid failed");
+                    return -1;
+                } // foreground process but its the child
+                if (tcsetpgrp(STDIN_FILENO, cpid) == -1) {
+                    perror("tcsetpgrp failed");
+                    return -1;
+                }
+                pid_t terminated_pid = waitpid(cpid, &status, WUNTRACED);
                 if (terminated_pid < 0) {
                     perror("waitpid() failed");
                     return -1;
                 }
-                if (!WIFEXITED(status)) {
-                    printf("Child exited abnormally\n");
+                if (tcsetpgrp(STDIN_FILENO, ppid) == -1) {
+                    perror("Restoring parent process group failed");
+                    return -1;
                 }
+                // if (!WIFEXITED(status)) {
+                //     perror("Child exited abnormally");
+                // }
+                // if (WIFSIGNALED(status)) {
+                //     printf("Child terminated abnormally\n");
+                // }
+                // TODO Task 5: Handle the issue of foreground/background terminal process groups.
+                // Do this by taking the following steps in the shell (parent) process:
+                // 1. Modify your call to waitpid(): Wait specifically for the child just forked, and
+                //    use WUNTRACED as your third argument to detect if it has stopped from a signal
+                // 2. After waitpid() has returned, call tcsetpgrp(STDIN_FILENO, <pid>) where pid is
+                //    the process ID of the shell process (use getpid() to obtain it)
+                // 3. If the child status was stopped by a signal, add it to 'jobs', the
+                //    the terminal's jobs list.
+                // You can detect if this has occurred using WIFSTOPPED on the status
+                // variable set by waitpid()
+                if (WIFSTOPPED(status)) {
+                    job_list_add(&jobs, cpid, tokens.data[0], status);
+                } else {
+                    tcsetpgrp(STDIN_FILENO, ppid);
+                }
+
             }
 
-            // TODO Task 4: Set the child process as the target of signals sent to the terminal
-            // via the keyboard.
-            // To do this, call 'tcsetpgrp(STDIN_FILENO, <child_pid>)', where child_pid is the
-            // child's process ID just returned by fork(). Do this in the parent process.
+
+
 
             // TODO Task 5: Handle the issue of foreground/background terminal process groups.
             // Do this by taking the following steps in the shell (parent) process:
@@ -198,6 +232,7 @@ int main(int argc, char **argv) {
             //    the terminal's jobs list.
             // You can detect if this has occurred using WIFSTOPPED on the status
             // variable set by waitpid()
+
 
             // TODO Task 6: If the last token input by the user is "&", start the current
             // command in the background.
