@@ -48,7 +48,8 @@ int run_command(strvec_t *tokens) {
     // won't have to use malloc.
     if (tokens->length == 0) {
         fprintf(stderr, "Error: No command to execute.\n");
-        exit(1);
+        // exit(1);
+        return -1;
     }
 
     char *args[tokens->length + 1];

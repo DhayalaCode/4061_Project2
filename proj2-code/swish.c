@@ -166,14 +166,17 @@ int main(int argc, char **argv) {
             pid_t cpid = fork();
             if (cpid < 0) {
                 perror("fork failed.");
+                return 1;
             } else if (cpid == 0) {
-                run_command(&tokens);
-                exit(1);
+                if (run_command(&tokens) == -1){
+                    exit(1);
+                }
+                exit(0);
             } else {
                 pid_t terminated_pid = waitpid(cpid, &status, 0);
                 if (terminated_pid < 0) {
-                    perror("wait() failed");
-                    return 1;
+                    perror("waitpid() failed");
+                    return -1;
                 }
                 if (!WIFEXITED(status)) {
                     printf("Child exited abnormally\n");
