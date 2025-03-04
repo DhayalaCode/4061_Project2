@@ -29,8 +29,8 @@ int tokenize(char *s, strvec_t *tokens) {
     }
 
     char *token = strtok(s, " ");
-    while(token != NULL) {
-        if (strvec_add(tokens, token) == -1) { //adding the string to string vector
+    while (token != NULL) {
+        if (strvec_add(tokens, token) == -1) {    // adding the string to string vector
             return -1;
         }
         token = strtok(NULL, " ");
@@ -57,11 +57,6 @@ int run_command(strvec_t *tokens) {
         args[i] = tokens->data[i];
     }
     args[tokens->length] = NULL;
-    if(execvp(args[0], args) < 0){
-        perror("exec");
-        return -1;
-    }
-
 
     // TODO Task 3: Extend this function to perform output redirection before exec()'ing
     // Check for '<' (redirect input), '>' (redirect output), '>>' (redirect and append output)
@@ -70,6 +65,97 @@ int run_command(strvec_t *tokens) {
     // Use dup2() to redirect stdin (<), stdout (> or >>)
     // DO NOT pass redirection operators and file names to exec()'d program
     // E.g., "ls -l > out.txt" should be exec()'d with strings "ls", "-l", NULL
+
+    // Save the indices of the specific operators
+    int in_index = -1, out_index = -1, append_index = -1;
+
+    in_index = strvec_find(tokens, "<");
+    out_index = strvec_find(tokens, ">");
+    append_index = strvec_find(tokens, ">>");
+
+    // Handle input redirection if needed
+    if (in_index != -1) {
+        if (in_index + 1 >= tokens->length) {
+            perror("Error: No input file specified.\n");
+            return -1;
+        }
+
+        int fd = open(tokens->data[in_index + 1], O_RDONLY);
+
+        if (fd < 0) {
+            perror("Failed to open input file");
+            return -1;
+        }
+
+        if (dup2(fd, STDIN_FILENO) < 0) {
+            perror("dup2 failed");
+            close(fd);
+            return -1;
+        }
+
+        if (close(fd) < 0) {
+            perror("failed to close file");
+            return -1;
+        }
+    }
+
+    // Handle output direction if needed
+    if (out_index != -1 || append_index != 0) {
+        int fd_out;
+
+        if (out_index != -1) {
+            if (out_index + 1 >= tokens->length) {
+                perror("Error: No output file specified.\n");
+                return -1;
+            }
+
+            fd_out =
+                open(tokens->data[out_index + 1], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+
+        } else {    // append_index != -1
+            if (append_index + 1 >= tokens->length) {
+                perror("Error: No output file specified.\n");
+                return -1;
+            }
+
+            fd_out = open(tokens->data[append_index + 1], O_WRONLY | O_CREAT | O_APPEND,
+                          S_IRUSR | S_IWUSR);
+        }
+
+        if (fd_out < 0) {
+            perror("Failed to open output file");
+            return -1;
+        }
+
+        if (dup2(fd_out, STDOUT_FILENO) < 0) {
+            perror("dup2 failed for output redirection");
+            close(fd_out);
+            return -1;
+        }
+
+        if (close(fd_out) < 0) {
+            perror("failed to close file");
+            return -1;
+        }
+    }
+
+    // Build the argument list for execvp() excluding redirection tokens.
+    int j = 0;
+    for (int i = 0; i < tokens->length; i++) {
+        // Skip the redirection operator and its following token.
+        if ((in_index != -1 && (i == in_index || i == in_index + 1)) ||
+            (out_index != -1 && (i == out_index || i == out_index + 1)) ||
+            (append_index != -1 && (i == append_index || i == append_index + 1))) {
+            continue;
+        }
+        args[j++] = tokens->data[i];
+    }
+    args[j] = NULL;
+
+    if (execvp(args[0], args) < 0) {
+        perror("exec");
+        return -1;
+    }
 
     // TODO Task 4: You need to do two items of setup before exec()'ing
     // 1. Restore the signal handlers for SIGTTOU and SIGTTIN to their defaults.
