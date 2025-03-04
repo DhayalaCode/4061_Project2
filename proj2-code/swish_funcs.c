@@ -46,6 +46,11 @@ int run_command(strvec_t *tokens) {
     // Hint: Build a string array from the 'tokens' vector and pass this into execvp()
     // Another Hint: You have a guarantee of the longest possible needed array, so you
     // won't have to use malloc.
+    if (tokens->length == 0) {
+        fprintf(stderr, "Error: No command to execute.\n");
+        exit(1);
+    }
+
     char *args[tokens->length + 1];
     for (int i = 0; i < tokens->length; i++) {
         args[i] = tokens->data[i];
@@ -53,7 +58,7 @@ int run_command(strvec_t *tokens) {
     args[tokens->length] = NULL;
     if(execvp(args[0], args) < 0){
         perror("exec");
-        return 1;
+        return -1;
     }
 
 

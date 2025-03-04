@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
             }
 
             if (getcwd(buffer,CMD_LEN) == NULL) {
-                perror("getcwd error");
+                perror("getcwd");
                 free(buffer);
                 return -1;
             }
@@ -85,15 +85,20 @@ int main(int argc, char **argv) {
             // Otherwise, change to the home directory by default
             // This is available in the HOME environment variable (use getenv())
             const char *second_token = strvec_get(&tokens, 1);
-            if (second_token != NULL) {
+            const char *home = getenv("HOME");
+            if (second_token) {
                 if (chdir(second_token) != 0) {
                     perror("chdir");
-                    if (chdir(getenv("HOME")) != 0) { //error checking from get env?
-                        perror("cannot change dir to HOME.");
+                    if (home ==  NULL){
+                        fprintf(stderr, "cd: HOME environment variable not set properly\n");
+                    } else if (chdir(home) != 0) {
+                        perror("chdir");
                     }
                 }
             } else {
-                if (chdir(getenv("HOME")) != 0) { //error checking from get env?
+                if (home ==  NULL){
+                    fprintf(stderr, "cd: HOME environment variable not set properly\n");
+                } else if (chdir(home) != 0) {
                     perror("chdir");
                 }
             }
