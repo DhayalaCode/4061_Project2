@@ -191,9 +191,16 @@ int main(int argc, char **argv) {
                     perror("waitpid() failed");
                     return -1;
                 }
+
+                // ALWAYS restore terminal control to the shell after waiting
                 if (tcsetpgrp(STDIN_FILENO, ppid) == -1) {
                     perror("Restoring parent process group failed");
                     return -1;
+                }
+
+                // Then handle stopped processes separately
+                if (WIFSTOPPED(status)) {
+                    job_list_add(&jobs, cpid, tokens.data[0], status);
                 }
                 // if (!WIFEXITED(status)) {
                 //     perror("Child exited abnormally");
@@ -211,11 +218,11 @@ int main(int argc, char **argv) {
                 //    the terminal's jobs list.
                 // You can detect if this has occurred using WIFSTOPPED on the status
                 // variable set by waitpid()
-                if (WIFSTOPPED(status)) {
-                    job_list_add(&jobs, cpid, tokens.data[0], status);
-                } else {
-                    tcsetpgrp(STDIN_FILENO, ppid);
-                }
+                // if (WIFSTOPPED(status)) {
+                //     job_list_add(&jobs, cpid, tokens.data[0], status);
+                // }
+                // tcsetpgrp(STDIN_FILENO, ppid);
+
 
             }
 

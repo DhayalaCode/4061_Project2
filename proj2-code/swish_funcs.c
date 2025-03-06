@@ -39,52 +39,14 @@ int tokenize(char *s, strvec_t *tokens) {
     return 0;
 }
 
+
 int run_command(strvec_t *tokens) {
-    // TODO Task 2: Execute the specified program (token 0) with the
-    // specified command-line arguments
-    // THIS FUNCTION SHOULD BE CALLED FROM A CHILD OF THE MAIN SHELL PROCESS
-    // Hint: Build a string array from the 'tokens' vector and pass this into execvp()
-    // Another Hint: You have a guarantee of the longest possible needed array, so you
-    // won't have to use malloc.
     if (tokens->length == 0) {
         fprintf(stderr, "Error: No command to execute.\n");
-        // exit(1);
         return -1;
     }
+
     char *args[tokens->length + 1];
-    for (int i = 0; i < tokens->length; i++) {
-        args[i] = tokens->data[i];
-    }
-    args[tokens->length] = NULL;
-
-
-    struct sigaction dft_sig_action;
-    dft_sig_action.sa_handler = SIG_DFL;
-    if (sigfillset(&dft_sig_action.sa_mask) == -1) {
-        perror("sigfillset");
-        return 1;
-    }
-    dft_sig_action.sa_flags = 0;
-    if (sigaction(SIGTTIN, &dft_sig_action, NULL) == -1 || sigaction(SIGTTOU, &dft_sig_action, NULL) == -1) {
-        perror("sigaction");
-        return 1;
-    }
-    pid_t pid = getpid();
-    if (setpgid(pid, pid) == -1) {
-        perror("setpgid");
-        return -1;
-    }
-
-
-    // TODO Task 3: Extend this function to perform output redirection before exec()'ing
-    // Check for '<' (redirect input), '>' (redirect output), '>>' (redirect and append output)
-    // entries inside of 'tokens' (the strvec_find() function will do this for you)
-    // Open the necessary file for reading (<), writing (>), or appending (>>)
-    // Use dup2() to redirect stdin (<), stdout (> or >>)
-    // DO NOT pass redirection operators and file names to exec()'d program
-    // E.g., "ls -l > out.txt" should be exec()'d with strings "ls", "-l", NULL
-
-    // Save the indices of the specific operators
     int in_index = -1, out_index = -1, append_index = -1;
 
     in_index = strvec_find(tokens, "<");
@@ -99,7 +61,6 @@ int run_command(strvec_t *tokens) {
         }
 
         int fd = open(tokens->data[in_index + 1], O_RDONLY);
-
         if (fd < 0) {
             perror("Failed to open input file");
             return -1;
@@ -111,14 +72,11 @@ int run_command(strvec_t *tokens) {
             return -1;
         }
 
-        if (close(fd) < 0) {
-            perror("failed to close file");
-            return -1;
-        }
+        close(fd);
     }
 
-    // Handle output direction if needed
-    if (out_index != -1 || append_index != 0) {
+    // Handle output redirection if needed
+    if (out_index != -1 || append_index != -1) {
         int fd_out;
 
         if (out_index != -1) {
@@ -127,17 +85,14 @@ int run_command(strvec_t *tokens) {
                 return -1;
             }
 
-            fd_out =
-                open(tokens->data[out_index + 1], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-
-        } else {    // append_index != -1
+            fd_out = open(tokens->data[out_index + 1], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        } else {
             if (append_index + 1 >= tokens->length) {
                 perror("Error: No output file specified.\n");
                 return -1;
             }
 
-            fd_out = open(tokens->data[append_index + 1], O_WRONLY | O_CREAT | O_APPEND,
-                          S_IRUSR | S_IWUSR);
+            fd_out = open(tokens->data[out_index + 1], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
         }
 
         if (fd_out < 0) {
@@ -151,40 +106,206 @@ int run_command(strvec_t *tokens) {
             return -1;
         }
 
-        if (close(fd_out) < 0) {
-            perror("failed to close file");
-            return -1;
-        }
+        close(fd_out);
     }
 
     // Build the argument list for execvp() excluding redirection tokens.
     int j = 0;
     for (int i = 0; i < tokens->length; i++) {
         // Skip the redirection operator and its following token.
-        if ((in_index != -1 && (i == in_index || i == in_index + 1)) ||
-            (out_index != -1 && (i == out_index || i == out_index + 1)) ||
-            (append_index != -1 && (i == append_index || i == append_index + 1))) {
-            continue;
+        if ((in_index != -1 && (i == in_index || i == in_index + 1))) {
+            continue; // Skip input redirection operator and its file
         }
-        args[j++] = tokens->data[i];
+        if ((out_index != -1 && (i == out_index || i == out_index + 1))) {
+            continue; // Skip output redirection operator and its file
+        }
+        if ((append_index != -1 && (i == append_index || i == append_index + 1))) {
+            continue; // Skip append redirection operator and its file
+        }
+        args[j++] = tokens->data[i]; // Add the token to the args array
     }
-    args[j] = NULL;
+    args[j] = NULL; // Null-terminate the args array
 
-    if (execvp(args[0], args) < 0) {
-        perror("exec");
+    // Restore default signal handlers for SIGTTIN and SIGTTOU
+    struct sigaction dft_sig_action;
+    dft_sig_action.sa_handler = SIG_DFL;
+    if (sigfillset(&dft_sig_action.sa_mask) == -1) {
+        perror("sigfillset");
+        return 1;
+    }
+    dft_sig_action.sa_flags = 0;
+    if (sigaction(SIGTTIN, &dft_sig_action, NULL) == -1 || sigaction(SIGTTOU, &dft_sig_action, NULL) == -1) {
+        perror("sigaction");
+        return 1;
+    }
+
+    // Set the process group ID
+    pid_t pid = getpid();
+    if (setpgid(pid, pid) == -1) {
+        perror("setpgid");
         return -1;
     }
 
-    // TODO Task 4: You need to do two items of setup before exec()'ing
-    // 1. Restore the signal handlers for SIGTTOU and SIGTTIN to their defaults.
-    // The code in main() within swish.c sets these handlers to the SIG_IGN value.
-    // Adapt this code to use sigaction() to set the handlers to the SIG_DFL value.
-    // 2. Change the process group of this process (a child of the main shell).
-    // Call getpid() to get its process ID then call setpgid() and use this process
-    // ID as the value for the new process group ID
+    // Execute the command
+    if (execvp(args[0], args) < 0) {
+        perror("exec");
+        _exit(1);
+    }
 
     return 0;
 }
+// int run_command(strvec_t *tokens) {
+//     // TODO Task 2: Execute the specified program (token 0) with the
+//     // specified command-line arguments
+//     // THIS FUNCTION SHOULD BE CALLED FROM A CHILD OF THE MAIN SHELL PROCESS
+//     // Hint: Build a string array from the 'tokens' vector and pass this into execvp()
+//     // Another Hint: You have a guarantee of the longest possible needed array, so you
+//     // won't have to use malloc.
+//     if (tokens->length == 0) {
+//         fprintf(stderr, "Error: No command to execute.\n");
+//         // exit(1);
+//         return -1;
+//     }
+//     char *args[tokens->length + 1];
+//     for (int i = 0; i < tokens->length; i++) {
+//         args[i] = tokens->data[i];
+//     }
+//     args[tokens->length] = NULL;
+
+
+
+
+
+//     // TODO Task 3: Extend this function to perform output redirection before exec()'ing
+//     // Check for '<' (redirect input), '>' (redirect output), '>>' (redirect and append output)
+//     // entries inside of 'tokens' (the strvec_find() function will do this for you)
+//     // Open the necessary file for reading (<), writing (>), or appending (>>)
+//     // Use dup2() to redirect stdin (<), stdout (> or >>)
+//     // DO NOT pass redirection operators and file names to exec()'d program
+//     // E.g., "ls -l > out.txt" should be exec()'d with strings "ls", "-l", NULL
+
+//     // Save the indices of the specific operators
+//     int in_index = -1, out_index = -1, append_index = -1;
+
+//     in_index = strvec_find(tokens, "<");
+//     out_index = strvec_find(tokens, ">");
+//     append_index = strvec_find(tokens, ">>");
+
+//     // Handle input redirection if needed
+//     if (in_index != -1) {
+//         if (in_index + 1 >= tokens->length) {
+//             perror("Error: No input file specified.\n");
+//             return -1;
+//         }
+
+//         int fd = open(tokens->data[in_index + 1], O_RDONLY);
+
+//         if (fd < 0) {
+//             perror("Failed to open input file");
+//             return -1;
+//         }
+
+//         if (dup2(fd, STDIN_FILENO) < 0) {
+//             perror("dup2 failed");
+//             close(fd);
+//             return -1;
+//         }
+
+//         if (close(fd) < 0) {
+//             perror("failed to close file");
+//             return -1;
+//         }
+//     }
+
+//     // Handle output direction if needed
+//     if (out_index != -1 || append_index != -1) {
+//         int fd_out;
+
+//         if (out_index != -1) {
+//             if (out_index + 1 >= tokens->length) {
+//                 perror("Error: No output file specified.\n");
+//                 exit(1);
+//             }
+
+//             fd_out = open(tokens->data[out_index + 1], O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+
+//         } else {    // append_index != -1
+//             if (append_index + 1 >= tokens->length) {
+//                 perror("Error: No output file specified.\n");
+//                 return -1;
+//             }
+
+//             fd_out = open(tokens->data[append_index + 1], O_WRONLY | O_CREAT | O_APPEND,
+//                           S_IRUSR | S_IWUSR);
+//         }
+
+//         if (fd_out < 0) {
+//             perror("Failed to open output file");
+//             return -1;
+//         }
+
+//         if (dup2(fd_out, STDOUT_FILENO) < 0) {
+//             perror("dup2 failed for output redirection");
+//             close(fd_out);
+//             return -1;
+//         }
+
+//         if (close(fd_out) < 0) {
+//             perror("failed to close file");
+//             return -1;
+//         }
+//     }
+
+//     // Build the argument list for execvp() excluding redirection tokens.
+//     int j = 0;
+//     for (int i = 0; i < tokens->length; i++) {
+//         // Skip the redirection operator and its following token.
+//         if ((in_index != -1 && (i == in_index || i == in_index + 1)) ||
+//             (out_index != -1 && (i == out_index || i == out_index + 1)) ||
+//             (append_index != -1 && (i == append_index || i == append_index + 1))) {
+//             continue;
+//         }
+//         args[j++] = tokens->data[i];
+//     }
+//     args[j] = NULL;
+
+//     struct sigaction dft_sig_action;
+//     dft_sig_action.sa_handler = SIG_DFL;
+//     if (sigfillset(&dft_sig_action.sa_mask) == -1) {
+//         perror("sigfillset");
+//         return 1;
+//     }
+//     dft_sig_action.sa_flags = 0;
+//     if (sigaction(SIGTTIN, &dft_sig_action, NULL) == -1 || sigaction(SIGTTOU, &dft_sig_action, NULL) == -1) {
+//         perror("sigaction");
+//         return 1;
+//     }
+//     pid_t pid = getpid();
+//     if (setpgid(pid, pid) == -1) {
+//         perror("setpgid");
+//         return -1;
+//     }
+
+//     fprintf(stderr, "DEBUG: About to execute command: %s\n", args[0]);
+//     for (int i = 0; args[i] != NULL; i++) {
+//         fprintf(stderr, "DEBUG: arg[%d] = %s\n", i, args[i]);
+//     }
+
+//     if (execvp(args[0], args) < 0) {
+//         perror("exec");
+//         _exit(1);
+//     }
+
+//     // TODO Task 4: You need to do two items of setup before exec()'ing
+//     // 1. Restore the signal handlers for SIGTTOU and SIGTTIN to their defaults.
+//     // The code in main() within swish.c sets these handlers to the SIG_IGN value.
+//     // Adapt this code to use sigaction() to set the handlers to the SIG_DFL value.
+//     // 2. Change the process group of this process (a child of the main shell).
+//     // Call getpid() to get its process ID then call setpgid() and use this process
+//     // ID as the value for the new process group ID
+
+//     return 0;
+// }
 
 int resume_job(strvec_t *tokens, job_list_t *jobs, int is_foreground) {
     // TODO Task 5: Implement the ability to resume stopped jobs in the foreground
