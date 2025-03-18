@@ -1,0 +1,4 @@
+@> ./slow_write 5 0 out.txt &
+@> sleep 1
+@> cat out.txt
+@> exit

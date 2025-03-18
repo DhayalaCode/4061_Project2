@@ -1,0 +1,2 @@
+@> wc < test_cases/resources/gatsby.txt
+@> exit

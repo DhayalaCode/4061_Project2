@@ -1,0 +1,3 @@
+@> cat < test_cases/resources/quote.txt > out.txt
+@> cat out.txt
+@> exit

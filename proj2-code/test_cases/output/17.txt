@@ -1,0 +1,4 @@
+@> wc -c -m -l -L -w test_cases/resources/gatsby.txt > out.txt
+@> cat out.txt
+{{wc -c -m -l -L -w test_cases/resources/gatsby.txt}}
+@> exit

@@ -1,0 +1,10 @@
+@> wc
+@> jobs
+0: wc (stopped)
+@> fg 1
+Job index out of bounds
+Failed to resume job in foreground
+@> fg 0
+      0       0       0
+@> jobs
+@> exit

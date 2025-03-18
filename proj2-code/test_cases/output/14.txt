@@ -1,0 +1,10 @@
+@> echo foo > out.txt
+@> cat out.txt
+foo
+@> cd test_cases/resources
+@> ls > ../../out.txt
+@> cat ../../out.txt
+gatsby.txt
+quote.txt
+slow_write.c
+@> exit

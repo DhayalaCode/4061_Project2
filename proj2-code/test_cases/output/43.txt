@@ -1,0 +1,12 @@
+@> ./slow_write 3 1 out.txt
+@> jobs
+0: ./slow_write (stopped)
+@> bg 0
+@> jobs
+0: ./slow_write (background)
+@> sleep 4
+@> cat out.txt
+1
+2
+3
+@> exit

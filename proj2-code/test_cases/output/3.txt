@@ -1,0 +1,6 @@
+@> pwd
+{{pwd}}
+@> cd test_cases
+@> pwd
+{{pwd}}/test_cases
+@> exit
